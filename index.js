@@ -37,6 +37,23 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Ruta raíz
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: '🚀 Albiero Backend API is running!',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV,
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/api/health',
+      auth: '/api/auth',
+      users: '/api/users',
+      leads: '/api/leads'
+    }
+  });
+});
+
 // Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/users'));
@@ -52,11 +69,20 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// 404 handler
-app.use((req, res) => {
+// Manejo de rutas no encontradas - FORMA CORRECTA
+app.use((req, res, next) => {
+  // Si la ruta empieza con /api, es un endpoint de API no encontrado
+  if (req.originalUrl.startsWith('/api')) {
+    return res.status(404).json({
+      success: false,
+      message: `API endpoint ${req.method} ${req.originalUrl} not found`
+    });
+  }
+  
+  // Para cualquier otra ruta que no sea /api
   res.status(404).json({
     success: false,
-    message: `Route ${req.method} ${req.originalUrl} not found`
+    message: `Route ${req.method} ${req.originalUrl} not found. Use /api endpoints.`
   });
 });
 
