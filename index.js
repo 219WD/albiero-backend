@@ -5,52 +5,77 @@ require('dotenv').config();
 
 const app = express();
 
-// Configuración de CORS mejorada
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Lista de orígenes permitidos
-    const allowedOrigins = [
-      'https://albiero-form.vercel.app',
-      'http://localhost:5173'
-    ];
-    
-    // En desarrollo, permitir cualquier origen
-    if (process.env.NODE_ENV === 'development') {
-      return callback(null, true);
+// Configuración moderna de MongoDB (sin las opciones obsoletas)
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  maxPoolSize: 10,
+};
+
+let isConnected = false;
+
+const connectDB = async () => {
+  try {
+    if (isConnected) {
+      console.log('✅ Using existing MongoDB connection');
+      return;
     }
+
+    console.log('🔄 Establishing new MongoDB connection...');
     
-    // En producción, verificar el origen
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+    await mongoose.connect(process.env.MONGODB_URI, mongooseOptions);
+    isConnected = true;
+    
+    console.log('✅ MongoDB connected successfully');
+
+    mongoose.connection.on('error', (err) => {
+      console.error('❌ MongoDB connection error:', err);
+      isConnected = false;
+    });
+
+    mongoose.connection.on('disconnected', () => {
+      console.log('🔌 MongoDB disconnected');
+      isConnected = false;
+    });
+
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    isConnected = false;
+  }
+};
+
+// Conectar a la base de datos al iniciar
+connectDB();
+
+// Middleware para verificar/conectar DB antes de cada request
+app.use(async (req, res, next) => {
+  if (!isConnected) {
+    console.log('🔄 Reconnecting to MongoDB...');
+    await connectDB();
+  }
+  next();
+});
+
+// Configuración de CORS
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? ['https://albiero-form.vercel.app']
+    : ['http://localhost:5173'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-};
+}));
 
-app.use(cors(corsOptions));
-
-// Middlewares
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Ruta raíz
 app.get('/', (req, res) => {
-  res.status(200).json({
+  res.json({
     success: true,
     message: '🚀 Albiero Backend API is running!',
-    version: '1.0.0',
     environment: process.env.NODE_ENV,
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      health: '/api/health',
-      auth: '/api/auth',
-      users: '/api/users',
-      leads: '/api/leads'
-    }
+    database: isConnected ? 'connected' : 'disconnected'
   });
 });
 
@@ -59,68 +84,56 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/leads', require('./routes/leads'));
 
-// Health check
+// Health check con estado de DB
 app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'Server is running',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV
+  res.json({ 
+    success: true, 
+    message: 'Server is healthy',
+    database: isConnected ? 'connected' : 'disconnected',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Manejo de rutas no encontradas - FORMA CORRECTA
-app.use((req, res, next) => {
-  // Si la ruta empieza con /api, es un endpoint de API no encontrado
-  if (req.originalUrl.startsWith('/api')) {
-    return res.status(404).json({
+// Manejo de rutas 404
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Route ${req.method} ${req.originalUrl} not found`
+  });
+});
+
+// Error handler mejorado
+app.use((error, req, res, next) => {
+  console.error('Server Error:', error);
+  
+  // Si es timeout de MongoDB
+  if (error.name === 'MongooseError' && error.message.includes('buffering timed out')) {
+    return res.status(503).json({
       success: false,
-      message: `API endpoint ${req.method} ${req.originalUrl} not found`
+      message: 'Database connection timeout. Please try again.',
+      code: 'DB_TIMEOUT'
     });
   }
   
-  // Para cualquier otra ruta que no sea /api
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.method} ${req.originalUrl} not found. Use /api endpoints.`
-  });
-});
-
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error('Error:', error);
-  
-  // Manejar errores de CORS
-  if (error.message === 'Not allowed by CORS') {
-    return res.status(403).json({
+  // Si es error de conexión a MongoDB
+  if (error.name === 'MongoNetworkError') {
+    return res.status(503).json({
       success: false,
-      message: 'CORS policy: Origin not allowed'
+      message: 'Database connection error. Please try again.',
+      code: 'DB_CONNECTION_ERROR'
     });
   }
   
   res.status(500).json({
     success: false,
     message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
+    code: 'INTERNAL_ERROR'
   });
 });
 
-// Database connection
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.MONGODB_URI);
-    console.log('✅ MongoDB connected successfully');
-  } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
-    process.exit(1);
-  }
-};
-
-// Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, async () => {
-  await connectDB();
-  console.log(`🚀 Server running on port ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`🚀 Server on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV}`);
   console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL}`);
 });
